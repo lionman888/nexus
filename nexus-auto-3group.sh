@@ -638,12 +638,12 @@ function uninstall_all_nodes() {
     done
 
     # 删除所有轮换容器
-    for i in {1..8}; do
+    for i in {1..7}; do
         docker rm -f "${BASE_CONTAINER_NAME}-group-$i" 2>/dev/null || true
     done
 
     # 停止并删除轮换进程
-    for i in {1..8}; do
+    for i in {1..7}; do
         pm2 delete "nexus-group-$i" 2>/dev/null || true
     done
 
@@ -680,8 +680,8 @@ function start_auto_rotation() {
 
     echo "读取到 ${#node_ids[@]} 个ID"
 
-    # 按3个ID一组分配，最多8个容器
-    max_containers=8
+    # 按3个ID一组分配，最多7个容器
+    max_containers=7
     ids_per_container=3
     max_ids=$((max_containers * ids_per_container))
 
@@ -698,7 +698,7 @@ function start_auto_rotation() {
 
     # 停止旧的轮换进程
     echo "停止旧的轮换进程..."
-    for i in {1..8}; do
+    for i in {1..7}; do
         pm2 delete "nexus-group-$i" 2>/dev/null || true
     done
 
@@ -820,7 +820,7 @@ function switch_group_to_next_id() {
 
     # 显示当前运行的组
     echo "当前运行的容器组："
-    for i in {1..8}; do
+    for i in {1..7}; do
         container_name="${BASE_CONTAINER_NAME}-group-$i"
         if docker ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
             current_id=$(docker exec $container_name cat /root/.nexus/node-id 2>/dev/null || echo "未知")
@@ -829,10 +829,10 @@ function switch_group_to_next_id() {
     done
 
     echo ""
-    read -rp "请输入要切换的组号 (1-8): " group_num
+    read -rp "请输入要切换的组号 (1-7): " group_num
 
     # 验证输入
-    if [[ ! "$group_num" =~ ^[1-8]$ ]]; then
+    if [[ ! "$group_num" =~ ^[1-7]$ ]]; then
         echo "无效的组号"
         read -p "按任意键返回菜单"
         return
@@ -933,7 +933,7 @@ function batch_switch_to_next_id() {
     # 显示当前运行的组
     echo "当前运行的容器组："
     running_groups=()
-    for i in {1..8}; do
+    for i in {1..7}; do
         container_name="${BASE_CONTAINER_NAME}-group-$i"
         if docker ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
             current_id=$(docker exec $container_name cat /root/.nexus/node-id 2>/dev/null || echo "未知")
@@ -1105,7 +1105,7 @@ function parse_group_input() {
     
     for part in "${parts[@]}"; do
         # 检查是否是范围格式 (如 2-5)
-        if [[ "$part" =~ ^([1-8])-([1-8])$ ]]; then
+        if [[ "$part" =~ ^([1-7])-([1-7])$ ]]; then
             local start=${BASH_REMATCH[1]}
             local end=${BASH_REMATCH[2]}
             
@@ -1116,7 +1116,7 @@ function parse_group_input() {
                 done
             fi
         # 检查是否是单个数字
-        elif [[ "$part" =~ ^[1-8]$ ]]; then
+        elif [[ "$part" =~ ^[1-7]$ ]]; then
             groups+=($part)
         fi
     done
@@ -1125,45 +1125,44 @@ function parse_group_input() {
     printf '%s\n' "${groups[@]}" | sort -nu | tr '\n' ' '
 }
 
-# 脚本启动时自动检查和安装依赖
-echo "=========================================="
-echo "Nexus 多节点管理脚本启动中..."
-echo "=========================================="
-check_and_install_dependencies
-
 # 主菜单
 while true; do
     clear
     echo "脚本由哈哈哈哈编写，推特 @ferdie_jhovie，免费开源，请勿相信收费"
     echo "如有问题，可联系推特，仅此只有一个号"
     echo "========== Nexus 多节点管理（3ID一组版） =========="
-    echo "1. 自动轮换启动节点（从id.txt读取，3个ID一组，最多8容器）"
-    echo "2. 显示所有节点状态"
-    echo "3. 删除全部节点"
-    echo "4. 手动切换指定组到下一个ID"
-    echo "5. 批量切换容器组到下一个ID"
-    echo "6. 退出"
+    echo "1. 检查和安装所有依赖（Docker、Node.js、npm、pm2）"
+    echo "2. 自动轮换启动节点（从id.txt读取，3个ID一组，最多7容器）"
+    echo "3. 显示所有节点状态"
+    echo "4. 删除全部节点"
+    echo "5. 手动切换指定组到下一个ID"
+    echo "6. 批量切换容器组到下一个ID"
+    echo "7. 退出"
     echo "=================================================="
 
-    read -rp "请输入选项(1-6): " choice
+    read -rp "请输入选项(1-7): " choice
 
     case $choice in
         1)
-            start_auto_rotation
+            check_and_install_dependencies
+            read -p "按任意键返回菜单"
             ;;
         2)
-            list_nodes
+            start_auto_rotation
             ;;
         3)
-            uninstall_all_nodes
+            list_nodes
             ;;
         4)
-            switch_group_to_next_id
+            uninstall_all_nodes
             ;;
         5)
-            batch_switch_to_next_id
+            switch_group_to_next_id
             ;;
         6)
+            batch_switch_to_next_id
+            ;;
+        7)
             echo "退出脚本。"
             exit 0
             ;;
