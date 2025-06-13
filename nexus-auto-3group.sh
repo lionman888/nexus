@@ -30,41 +30,119 @@ function check_and_install_dependencies() {
 
     echo "检测到操作系统: $OS $VER"
 
+    # 等待并处理包管理器锁定问题
+    wait_for_package_manager
+
     # 更新包管理器
     echo "正在更新包管理器..."
-    case $OS in
-        ubuntu|debian)
-            apt update -y
-            ;;
-        centos|rhel|fedora)
-            if command -v yum >/dev/null 2>&1; then
-                yum update -y
-            elif command -v dnf >/dev/null 2>&1; then
-                dnf update -y
-            fi
-            ;;
-        *)
-            echo "警告：未知的操作系统，可能需要手动安装依赖"
-            ;;
-    esac
+    local max_retries=3
+    local retry_count=0
+    
+    while [ $retry_count -lt $max_retries ]; do
+        echo "尝试更新包管理器 (第 $((retry_count + 1))/$max_retries 次)..."
+        
+        # 确保包管理器可用
+        wait_for_package_manager
+        
+        local update_success=false
+        
+        case $OS in
+            ubuntu|debian)
+                if apt update -y; then
+                    update_success=true
+                fi
+                ;;
+            centos|rhel|fedora)
+                if command -v yum >/dev/null 2>&1; then
+                    if yum update -y; then
+                        update_success=true
+                    fi
+                elif command -v dnf >/dev/null 2>&1; then
+                    if dnf update -y; then
+                        update_success=true
+                    fi
+                fi
+                ;;
+            *)
+                echo "警告：未知的操作系统，跳过包管理器更新"
+                update_success=true
+                ;;
+        esac
+        
+        if [ "$update_success" = true ]; then
+            echo "包管理器更新成功"
+            break
+        fi
+        
+        retry_count=$((retry_count + 1))
+        if [ $retry_count -lt $max_retries ]; then
+            echo "包管理器更新失败，等待10秒后重试..."
+            sleep 10
+        fi
+    done
+    
+    if [ "$update_success" = false ]; then
+        echo "警告：包管理器更新失败，但脚本将继续运行"
+        echo "可能影响后续安装过程，建议检查网络连接"
+    fi
 
     # 安装基础工具
     echo "正在安装基础工具..."
-    case $OS in
-        ubuntu|debian)
-            apt install -y curl wget git unzip software-properties-common apt-transport-https ca-certificates gnupg lsb-release
-            ;;
-        centos|rhel)
-            if command -v yum >/dev/null 2>&1; then
-                yum install -y curl wget git unzip
-            elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl wget git unzip
-            fi
-            ;;
-        fedora)
-            dnf install -y curl wget git unzip
-            ;;
-    esac
+    local max_retries=3
+    local retry_count=0
+    
+    while [ $retry_count -lt $max_retries ]; do
+        echo "尝试安装基础工具 (第 $((retry_count + 1))/$max_retries 次)..."
+        
+        # 确保包管理器可用
+        wait_for_package_manager
+        
+        local install_success=false
+        
+        case $OS in
+            ubuntu|debian)
+                if apt install -y curl wget git unzip software-properties-common apt-transport-https ca-certificates gnupg lsb-release; then
+                    install_success=true
+                fi
+                ;;
+            centos|rhel)
+                if command -v yum >/dev/null 2>&1; then
+                    if yum install -y curl wget git unzip; then
+                        install_success=true
+                    fi
+                elif command -v dnf >/dev/null 2>&1; then
+                    if dnf install -y curl wget git unzip; then
+                        install_success=true
+                    fi
+                fi
+                ;;
+            fedora)
+                if dnf install -y curl wget git unzip; then
+                    install_success=true
+                fi
+                ;;
+            *)
+                echo "警告：未知操作系统，跳过基础工具安装"
+                install_success=true
+                ;;
+        esac
+        
+        if [ "$install_success" = true ]; then
+            echo "基础工具安装成功"
+            break
+        fi
+        
+        retry_count=$((retry_count + 1))
+        if [ $retry_count -lt $max_retries ]; then
+            echo "基础工具安装失败，等待10秒后重试..."
+            sleep 10
+        fi
+    done
+    
+    if [ "$install_success" = false ]; then
+        echo "警告：基础工具安装失败，但脚本将继续运行"
+        echo "可能影响后续安装过程，建议检查网络连接"
+    fi
 
     # 检查并安装 Docker
     check_docker
@@ -80,6 +158,128 @@ function check_and_install_dependencies() {
     echo "=========================================="
 }
 
+# 等待包管理器锁定解除
+function wait_for_package_manager() {
+    echo "检查包管理器状态..."
+    
+    # 检查是否有锁定文件存在
+    local lock_files=(
+        "/var/lib/dpkg/lock"
+        "/var/lib/dpkg/lock-frontend" 
+        "/var/cache/apt/archives/lock"
+        "/var/lib/apt/lists/lock"
+    )
+    
+    local max_wait=300  # 最多等待5分钟
+    local wait_time=0
+    local check_interval=10
+    
+    while [ $wait_time -lt $max_wait ]; do
+        local locks_found=false
+        
+        # 检查锁定文件
+        for lock_file in "${lock_files[@]}"; do
+            if [ -f "$lock_file" ]; then
+                if fuser "$lock_file" >/dev/null 2>&1; then
+                    locks_found=true
+                    break
+                fi
+            fi
+        done
+        
+        # 检查正在运行的包管理进程
+        if pgrep -x "apt" >/dev/null 2>&1 || \
+           pgrep -x "apt-get" >/dev/null 2>&1 || \
+           pgrep -x "dpkg" >/dev/null 2>&1 || \
+           pgrep -f "unattended-upgrade" >/dev/null 2>&1; then
+            locks_found=true
+        fi
+        
+        if [ "$locks_found" = false ]; then
+            echo "包管理器可用"
+            return 0
+        fi
+        
+        if [ $wait_time -eq 0 ]; then
+            echo "检测到包管理器正在使用中..."
+            echo "常见原因：系统自动更新、其他apt进程正在运行"
+        fi
+        
+        echo "等待包管理器释放... ($((wait_time + check_interval))/${max_wait}秒)"
+        sleep $check_interval
+        wait_time=$((wait_time + check_interval))
+    done
+    
+    # 如果等待超时，提供解决方案
+    echo "=========================================="
+    echo "警告：包管理器锁定等待超时！"
+    echo "=========================================="
+    echo "检测到以下可能的解决方案："
+    echo ""
+    
+    # 显示正在运行的相关进程
+    echo "正在运行的包管理进程："
+    ps aux | grep -E "(apt|dpkg|unattended-upgrade)" | grep -v grep || echo "未发现相关进程"
+    echo ""
+    
+    echo "请选择解决方案："
+    echo "1. 继续等待（推荐）"
+    echo "2. 尝试终止自动更新进程"
+    echo "3. 强制解除锁定（危险）"
+    echo "4. 退出脚本，手动处理"
+    echo ""
+    
+    read -rp "请输入选项 (1-4): " choice
+    
+    case $choice in
+        1)
+            echo "继续等待包管理器释放..."
+            wait_for_package_manager  # 递归调用，继续等待
+            ;;
+        2)
+            echo "尝试终止自动更新进程..."
+            pkill -f unattended-upgrade 2>/dev/null || true
+            systemctl stop unattended-upgrades 2>/dev/null || true
+            sleep 10
+            wait_for_package_manager  # 重新检查
+            ;;
+        3)
+            echo "警告：正在强制删除锁定文件..."
+            echo "这可能会导致系统不稳定！"
+            read -rp "确认执行？(输入 YES 确认): " confirm
+            if [ "$confirm" = "YES" ]; then
+                for lock_file in "${lock_files[@]}"; do
+                    if [ -f "$lock_file" ]; then
+                        rm -f "$lock_file"
+                        echo "删除锁定文件: $lock_file"
+                    fi
+                done
+                # 重新配置dpkg
+                dpkg --configure -a
+                echo "已尝试强制解除锁定"
+            else
+                echo "已取消强制解锁"
+                exit 1
+            fi
+            ;;
+        4)
+            echo "退出脚本。请手动处理包管理器锁定问题后重新运行。"
+            echo ""
+            echo "手动处理建议："
+            echo "1. 等待系统自动更新完成"
+            echo "2. 重启系统"
+            echo "3. 或执行以下命令："
+            echo "   sudo systemctl stop unattended-upgrades"
+            echo "   sudo pkill -f unattended-upgrade"
+            exit 1
+            ;;
+        *)
+            echo "无效选项，退出脚本"
+            exit 1
+            ;;
+    esac
+}
+
 # 检查并安装 Node.js/npm
 function check_nodejs() {
     echo "检查 Node.js/npm..."
@@ -87,32 +287,58 @@ function check_nodejs() {
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         echo "正在安装 Node.js 和 npm..."
         
-        case $OS in
-            ubuntu|debian)
-                # 使用 NodeSource 官方仓库安装最新 LTS 版本
-                curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-                apt install -y nodejs
-                ;;
-            centos|rhel|fedora)
-                # 使用 NodeSource 官方仓库
-                curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash -
-                if command -v yum >/dev/null 2>&1; then
-                    yum install -y nodejs npm
-                elif command -v dnf >/dev/null 2>&1; then
-                    dnf install -y nodejs npm
-                fi
-                ;;
-            *)
-                echo "请手动安装 Node.js 和 npm"
-                exit 1
-                ;;
-        esac
+        local max_retries=3
+        local retry_count=0
+        
+        while [ $retry_count -lt $max_retries ]; do
+            echo "尝试安装 Node.js/npm (第 $((retry_count + 1))/$max_retries 次)..."
+            
+            # 确保包管理器可用
+            wait_for_package_manager
+            
+            case $OS in
+                ubuntu|debian)
+                    # 使用 NodeSource 官方仓库安装最新 LTS 版本
+                    if curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && apt install -y nodejs; then
+                        break
+                    fi
+                    ;;
+                centos|rhel|fedora)
+                    # 使用 NodeSource 官方仓库
+                    if curl -fsSL https://rpm.nodesource.com/setup_lts.x | bash -; then
+                        if command -v yum >/dev/null 2>&1; then
+                            if yum install -y nodejs npm; then
+                                break
+                            fi
+                        elif command -v dnf >/dev/null 2>&1; then
+                            if dnf install -y nodejs npm; then
+                                break
+                            fi
+                        fi
+                    fi
+                    ;;
+                *)
+                    echo "请手动安装 Node.js 和 npm"
+                    exit 1
+                    ;;
+            esac
+            
+            retry_count=$((retry_count + 1))
+            if [ $retry_count -lt $max_retries ]; then
+                echo "安装失败，等待10秒后重试..."
+                sleep 10
+            fi
+        done
         
         # 验证安装
         if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
             echo "Node.js $(node --version) 和 npm $(npm --version) 安装成功"
         else
             echo "错误：Node.js/npm 安装失败"
+            echo "请尝试以下解决方案："
+            echo "1. 检查网络连接"
+            echo "2. 等待几分钟后重新运行脚本"
+            echo "3. 手动安装 Node.js: https://nodejs.org/"
             exit 1
         fi
     else
@@ -156,44 +382,74 @@ function check_docker() {
     if ! command -v docker >/dev/null 2>&1; then
         echo "正在安装 Docker..."
         
-        case $OS in
-            ubuntu|debian)
-                # 卸载旧版本
-                apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-                
-                # 安装 Docker 官方 GPG 密钥
-                curl -fsSL https://download.docker.com/linux/$OS/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-                
-                # 添加 Docker 官方 APT 仓库
-                echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/$OS $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-                
-                # 更新包索引
-                apt update -y
-                
-                # 安装 Docker Engine
-                apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-                ;;
-            centos|rhel)
-                # 卸载旧版本
-                if command -v yum >/dev/null 2>&1; then
-                    yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
-                    yum install -y yum-utils
-                    yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-                    yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-                elif command -v dnf >/dev/null 2>&1; then
-                    dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
-                    dnf install -y dnf-plugins-core
-                    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-                    dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-                fi
-                ;;
-            fedora)
-                dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-selinux docker-engine-selinux docker-engine 2>/dev/null || true
-                dnf install -y dnf-plugins-core
-                dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
-                dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-                ;;
-        esac
+        local max_retries=3
+        local retry_count=0
+        
+        while [ $retry_count -lt $max_retries ]; do
+            echo "尝试安装 Docker (第 $((retry_count + 1))/$max_retries 次)..."
+            
+            # 确保包管理器可用
+            wait_for_package_manager
+            
+            local install_success=false
+            
+            case $OS in
+                ubuntu|debian)
+                    # 卸载旧版本
+                    apt remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+                    
+                    # 安装 Docker 官方 GPG 密钥
+                    if curl -fsSL https://download.docker.com/linux/$OS/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg; then
+                        # 添加 Docker 官方 APT 仓库
+                        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/$OS $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+                        
+                        # 更新包索引并安装
+                        if apt update -y && apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin; then
+                            install_success=true
+                        fi
+                    fi
+                    ;;
+                centos|rhel)
+                    # 卸载旧版本
+                    if command -v yum >/dev/null 2>&1; then
+                        yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
+                        if yum install -y yum-utils && yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin; then
+                            install_success=true
+                        fi
+                    elif command -v dnf >/dev/null 2>&1; then
+                        dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
+                        if dnf install -y dnf-plugins-core && dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo && dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin; then
+                            install_success=true
+                        fi
+                    fi
+                    ;;
+                fedora)
+                    dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-selinux docker-engine-selinux docker-engine 2>/dev/null || true
+                    if dnf install -y dnf-plugins-core && dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo && dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin; then
+                        install_success=true
+                    fi
+                    ;;
+            esac
+            
+            if [ "$install_success" = true ]; then
+                break
+            fi
+            
+            retry_count=$((retry_count + 1))
+            if [ $retry_count -lt $max_retries ]; then
+                echo "Docker安装失败，等待10秒后重试..."
+                sleep 10
+            fi
+        done
+        
+        if [ "$install_success" = false ]; then
+            echo "错误：Docker 安装失败"
+            echo "请尝试以下解决方案："
+            echo "1. 检查网络连接"
+            echo "2. 等待几分钟后重新运行脚本"
+            echo "3. 手动安装 Docker: https://docs.docker.com/engine/install/"
+            exit 1
+        fi
         
         # 启动并启用 Docker 服务
         systemctl enable docker
